@@ -1,10 +1,31 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 import json
 import os
 import datetime
 
 DATA_FILE = "data.json"
+
+# ---------------- Custom Dialog for Long Email Input ----------------
+class LongEntryDialog(simpledialog.Dialog):
+    def __init__(self, parent, title, prompt):
+        self.prompt = prompt
+        self.result = None
+        super().__init__(parent, title)
+
+    def body(self, master):
+        tk.Label(master, text=self.prompt).grid(row=0, sticky="w")
+        # Create an entry with width=40
+        self.entry = tk.Entry(master, width=40)
+        self.entry.grid(row=1, column=0)
+        return self.entry
+
+    def apply(self):
+        self.result = self.entry.get()
+
+def ask_string_long(title, prompt):
+    d = LongEntryDialog(root, title, prompt)
+    return d.result
 
 # ---------------- Data Loading and Saving ----------------
 def load_data(filename=DATA_FILE):
@@ -49,6 +70,8 @@ selected_account_email = None
 selected_service_index = None
 edit_mode = False          # When True, account details fields are editable.
 original_account = {}      # To store original values for comparison.
+# Global list to map filtered service list indices to the actual service indices
+filtered_service_indices = []
 
 # ---------------- Main Window and Notebook ----------------
 root = tk.Tk()
@@ -76,7 +99,6 @@ main_tree.pack(fill="both", expand=True)
 
 def insert_account_tree(account_email, account_data, tree_widget):
     account_node = tree_widget.insert("", "end", text=account_email, open=False)
-    # Display "sign_in_with" value; remove this line if not needed.
     tree_widget.insert(account_node, "end", text="sign_in_with", values=(account_data.get("sign_in_with", ""),), open=False)
     services_branch = tree_widget.insert(account_node, "end", text="services", open=False)
     for service in account_data.get("services", []):
@@ -148,8 +170,6 @@ tk.Label(account_frame_crud, text="Email:", font=("Helvetica", 11)).grid(row=0, 
 email_entry = tk.Entry(account_frame_crud, width=60, font=("Helvetica", 11), state="disabled")
 email_entry.grid(row=0, column=1, padx=5, pady=5)
 
-# (Removed the Sign In With field for account details)
-
 # Password
 tk.Label(account_frame_crud, text="Password:", font=("Helvetica", 11)).grid(row=1, column=0, sticky="e", padx=5, pady=5)
 acc_password_entry = tk.Entry(account_frame_crud, width=60, font=("Helvetica", 11), state="disabled")
@@ -179,7 +199,36 @@ phone_entry.grid(row=3, column=1, padx=5, pady=5)
 # Account Buttons and Edit All
 acc_button_frame_crud = tk.Frame(account_frame_crud)
 acc_button_frame_crud.grid(row=4, column=1, pady=10)
-new_acc_btn = tk.Button(acc_button_frame_crud, text="New Account", command=lambda: new_account(), font=("Helvetica", 11))
+
+# ---- Updated New Account Function using Custom Dialog ----
+def new_account():
+    global selected_account_email
+    new_email = ask_string_long("New Account", "Enter new email:")
+    if not new_email:
+        return
+    new_email = new_email.strip()
+    if new_email == "OTHERS":
+        messagebox.showwarning("Input Error", "The account name 'OTHERS' is reserved.")
+        return
+    if new_email in data.get("accounts", {}):
+        messagebox.showwarning("Input Error", "Account with this email already exists.")
+        return
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data["accounts"][new_email] = {
+        "sign_in_with": new_email,
+        "password": "",
+        "dateCreated": now,
+        "phone": [],
+        "services": []
+    }
+    selected_account_email = new_email
+    selected_account_label_crud.config(text="Selected Account: " + new_email)
+    refresh_account_list()
+    refresh_services_list()
+    update_account_buttons()
+    save_data(data, silent=True)
+
+new_acc_btn = tk.Button(acc_button_frame_crud, text="New Account", command=new_account, font=("Helvetica", 11))
 new_acc_btn.pack(side="left", padx=5)
 add_svc_btn = tk.Button(acc_button_frame_crud, text="Add Service", command=lambda: add_service(), font=("Helvetica", 11))
 add_svc_btn.pack(side="left", padx=5)
@@ -288,9 +337,7 @@ tk.Label(service_frame_crud, text="Details (JSON):", font=("Helvetica", 11)).gri
 sdetails_text = tk.Text(service_frame_crud, width=60, height=8, font=("Helvetica", 11))
 sdetails_text.grid(row=12, column=1, padx=5, pady=5)
 
-# ---- New: Service List & Search Area ----
-# Create a frame that will hold the search bar (with autosuggest dropdown)
-# on the left side and the services list (output box) on the right.
+# ---- Service List & Search Area ----
 service_list_frame = tk.Frame(service_frame_crud)
 service_list_frame.grid(row=13, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
 
@@ -302,7 +349,6 @@ search_combobox = ttk.Combobox(search_frame, width=30)
 search_combobox.pack(anchor="w", pady=2)
 
 # Right side: Output box (the services list)
-# Right side: Output box (the services list)
 list_frame = tk.Frame(service_list_frame)
 list_frame.grid(row=0, column=1, sticky="nw", padx=5, pady=5)
 tk.Label(list_frame, text="Services List:", font=("Helvetica", 11)).pack(anchor="w")
@@ -310,59 +356,71 @@ services_listbox = tk.Listbox(list_frame, width=55, height=8, font=("Helvetica",
 services_listbox.pack(anchor="w", pady=2)
 services_listbox.bind("<<ListboxSelect>>", lambda event: on_service_select(event))
 
-# Functions for auto-suggest and filtering
-def filter_services(text):
+# --- Updated Filtering Functions (Case-Insensitive with Mapping) ---
+def filter_services(text, exact=False):
+    global filtered_service_indices
     services_listbox.delete(0, tk.END)
+    filtered_service_indices = []
     if selected_account_email is None:
         return
     if selected_account_email == "OTHERS":
         account = data["OTHERS"]
     else:
         account = data["accounts"].get(selected_account_email, {})
-    for svc in account.get("services", []):
+    for i, svc in enumerate(account.get("services", [])):
         svc_name = svc.get("name", "")
-        if text == "" or text.lower() in svc_name.lower():
+        if text == "":
             services_listbox.insert(tk.END, svc_name)
+            filtered_service_indices.append(i)
+        elif exact:
+            if svc_name.lower() == text.lower():
+                services_listbox.insert(tk.END, svc_name)
+                filtered_service_indices.append(i)
+        else:
+            if text.lower() in svc_name.lower():
+                services_listbox.insert(tk.END, svc_name)
+                filtered_service_indices.append(i)
 
 def on_search_update():
-    text = search_combobox.get().lower()
+    text = search_combobox.get()
     if selected_account_email is None:
         return
     if selected_account_email == "OTHERS":
         services = data["OTHERS"].get("services", [])
     else:
         services = data["accounts"].get(selected_account_email, {}).get("services", [])
-    suggestions = [svc.get("name", "") for svc in services if text in svc.get("name", "").lower()]
+    text_lower = text.lower()
+    suggestions = [svc.get("name", "") for svc in services if text_lower in svc.get("name", "").lower()]
     search_combobox['values'] = suggestions
-    filter_services(text)
+    filter_services(text, exact=False)
 
 def on_search_select():
     text = search_combobox.get()
-    filter_services(text)
+    filter_services(text, exact=True)
 
-# Bind the search combobox events.
 search_combobox.bind("<KeyRelease>", lambda event: on_search_update())
 search_combobox.bind("<<ComboboxSelected>>", lambda event: on_search_select())
 
-# Modify refresh_services_list() to respect any search text.
 def refresh_services_list():
-    # If search_combobox exists, use its text; otherwise show all.
+    global filtered_service_indices
     search_text = ""
     try:
-        search_text = search_combobox.get().lower()
+        search_text = search_combobox.get()
     except:
         pass
     if selected_account_email is None:
         return
     services_listbox.delete(0, tk.END)
+    filtered_service_indices = []
     if selected_account_email == "OTHERS":
         account = data["OTHERS"]
     else:
         account = data["accounts"].get(selected_account_email, {})
-    for svc in account.get("services", []):
+    for i, svc in enumerate(account.get("services", [])):
         svc_name = svc.get("name", "")
-        if search_text == "" or search_text in svc_name.lower():
+        if search_text == "" or search_text.lower() in svc_name.lower():
             services_listbox.insert(tk.END, svc_name)
+            filtered_service_indices.append(i)
 
 # ---- End of Service List & Search Area ----
 
@@ -477,10 +535,10 @@ def on_account_select(event):
 
 def new_account():
     global selected_account_email
-    new_email = email_entry.get().strip()
+    new_email = ask_string_long("New Account", "Enter new email:")
     if not new_email:
-        messagebox.showwarning("Input Error", "Enter an email for the new account.")
         return
+    new_email = new_email.strip()
     if new_email == "OTHERS":
         messagebox.showwarning("Input Error", "The account name 'OTHERS' is reserved.")
         return
@@ -489,7 +547,7 @@ def new_account():
         return
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["accounts"][new_email] = {
-        "sign_in_with": new_email,  # or adjust as needed
+        "sign_in_with": new_email,
         "password": "",
         "dateCreated": now,
         "phone": [],
@@ -594,7 +652,12 @@ def on_service_select(event):
     selection = services_listbox.curselection()
     if not selection or selected_account_email is None:
         return
-    selected_service_index = selection[0]
+    # Use mapping from filtered_service_indices to get the actual service index.
+    filtered_index = selection[0]
+    if filtered_index < len(filtered_service_indices):
+        selected_service_index = filtered_service_indices[filtered_index]
+    else:
+        return
     if selected_account_email == "OTHERS":
         account = data["OTHERS"]
     else:
